@@ -1,0 +1,5 @@
+.env*
+node_modules/
+dist/
+test/e2e/*.png
+release/

@@ -1,0 +1,20 @@
+{
+  "name": {
+    "message": "行间翻译 Interline - 双语网页与视频字幕"
+  },
+  "description": {
+    "message": "双语对照阅读网页和 YouTube 视频：译文显示在每段原文和每句字幕下方。"
+  },
+  "actionTitle": {
+    "message": "行间翻译"
+  },
+  "commandTogglePage": {
+    "message": "翻译当前网页 / 显示原文"
+  },
+  "menuTranslatePage": {
+    "message": "翻译此网页"
+  },
+  "menuTranslateSelection": {
+    "message": "翻译“%s”"
+  }
+}

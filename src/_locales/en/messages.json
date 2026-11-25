@@ -1,0 +1,20 @@
+{
+  "name": {
+    "message": "Interline – Bilingual Translation"
+  },
+  "description": {
+    "message": "Read web pages and YouTube videos in two languages: translations appear under every paragraph and subtitle."
+  },
+  "actionTitle": {
+    "message": "Interline"
+  },
+  "commandTogglePage": {
+    "message": "Translate this page or show the original"
+  },
+  "menuTranslatePage": {
+    "message": "Translate this page"
+  },
+  "menuTranslateSelection": {
+    "message": "Translate “%s”"
+  }
+}
