@@ -30,6 +30,7 @@ async function render() {
   fill($('displayStyle'), DISPLAY_STYLES.map((style) => [style, t(`style.${style}`)]), settings.displayStyle);
   $('youtubeSubtitles').checked = settings.youtubeSubtitles;
   $('autoPause').checked = settings.autoPause;
+  $('floatingButton').checked = settings.floatingButton;
 
   const warning = $('warning');
   warning.hidden = !needsSetup(settings);
@@ -70,7 +71,7 @@ async function main() {
     });
   }
 
-  for (const id of ['youtubeSubtitles', 'autoPause']) {
+  for (const id of ['youtubeSubtitles', 'autoPause', 'floatingButton']) {
     $(id).addEventListener('change', () => chrome.storage.local.set({ [id]: $(id).checked }));
   }
 

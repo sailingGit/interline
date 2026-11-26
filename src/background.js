@@ -56,6 +56,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     frameReady(sender).then((active) => sendResponse({ active }));
     return true;
   }
+  if (message?.type === 'toggleTab' && sender.tab) {
+    toggleTab(sender.tab.id).then(sendResponse);
+    return true;
+  }
   if (message?.type === 'startTab' && sender.tab) {
     setActive(sender.tab.id, true).then(() => sendResponse({}));
     return true;

@@ -2,7 +2,7 @@ import { DISPLAY_STYLES, LANGUAGES, loadSettings, translator, uiLanguage } from 
 
 const $ = (id) => document.getElementById(id);
 const TEXT_FIELDS = ['targetLanguage', 'displayStyle', 'selectionMode', 'engine', 'openaiKey', 'openaiModel', 'customBaseUrl', 'customKey', 'customModel'];
-const CHECKS = ['youtubeSubtitles', 'autoPause'];
+const CHECKS = ['youtubeSubtitles', 'autoPause', 'floatingButton'];
 let t = translator('en');
 
 for (const [code, { label }] of Object.entries(LANGUAGES)) $('targetLanguage').add(new Option(label, code));

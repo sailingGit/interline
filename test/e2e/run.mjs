@@ -89,6 +89,16 @@ const SHADOW_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8">
   </script>
 </body></html>`;
 
+// A post whose line breaks are newlines in one text node, as on X, and a
+// paragraph whose lines are separated by <br>.
+const LINES_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body>
+  <div id="post" style="white-space: pre-wrap"><span>It works :)
+
+- First line of the list
+- Second line with a <a href="#">link</a> inside</span></div>
+  <p id="verse">First line of the verse<br>Second line of the verse</p>
+</body></html>`;
+
 const CAPTIONS = {
   events: [
     { tStartMs: 0, dDurationMs: 2000, segs: [{ utf8: 'Hello there, friends.' }] },
@@ -109,6 +119,7 @@ async function startMock(tls) {
       return res.writeHead(200, { 'content-type': 'text/html' }).end(framesPage(`http://${other}`));
     }
     if (url.pathname === '/inner') return res.writeHead(200, { 'content-type': 'text/html' }).end(innerPage(url.searchParams.get('n')));
+    if (url.pathname === '/lines') return res.writeHead(200, { 'content-type': 'text/html' }).end(LINES_PAGE);
     if (url.pathname === '/shadow') return res.writeHead(200, { 'content-type': 'text/html' }).end(SHADOW_PAGE);
     if (url.pathname === '/x') return res.writeHead(200, { 'content-type': 'text/html' }).end(X_PAGE);
     if (url.pathname === '/watch') return res.writeHead(200, { 'content-type': 'text/html' }).end(PLAYER);
@@ -384,6 +395,85 @@ try {
     await page.locator('#fails font[data-il]').click();
     await waitFor(async () => (await translationOf(page, '#fails'))[0]?.text === '[zh-CN] This one will hit a rate limit.', 'retry');
     await ext.toggle('/article');
+  });
+
+  const fab = page.locator('[data-il-ui] .fab');
+
+  await step('the floating button translates the page and shows the original again', async () => {
+    await page.evaluate(() => scrollTo(0, 0));
+    await fab.waitFor({ state: 'visible' });
+    assert.equal(await fab.evaluate((el) => el.classList.contains('on')), false);
+    await fab.click();
+    await waitFor(async () => (await translationOf(page, '#title')).some((w) => w.text.startsWith('[zh-CN]')), 'translated by button');
+    await waitFor(() => fab.evaluate((el) => el.classList.contains('on')), 'button on');
+    await fab.click();
+    await waitFor(async () => (await page.evaluate(() => document.querySelectorAll('font[data-il]').length)) === 0, 'restored by button');
+    assert.equal(await fab.evaluate((el) => el.classList.contains('on')), false);
+  });
+
+  await step('dragging the floating button moves it without toggling translation', async () => {
+    const box = await fab.boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 - 120, { steps: 6 });
+    await page.mouse.up();
+    const moved = await fab.boundingBox();
+    assert.ok(Math.abs(moved.y - (box.y - 120)) < 3, `${box.y} -> ${moved.y}`);
+    await page.waitForTimeout(400);
+    assert.equal(await page.evaluate(() => document.querySelectorAll('font[data-il]').length), 0);
+    const saved = await ext.worker.evaluate(() => chrome.storage.local.get('fabTop'));
+    assert.ok(Math.abs(saved.fabTop * 800 - moved.y) < 3, JSON.stringify(saved));
+  });
+
+  await step('the floating button can be turned off', async () => {
+    await ext.worker.evaluate(() => chrome.storage.local.set({ floatingButton: false }));
+    await fab.waitFor({ state: 'hidden' });
+    await ext.worker.evaluate(() => chrome.storage.local.set({ floatingButton: true }));
+    await fab.waitFor({ state: 'visible' });
+  });
+
+  const lines = await ext.context.newPage();
+  lines.on('pageerror', (err) => errors.push(err.message));
+  await lines.goto(`${mock.origin}/lines`);
+  const layout = (selector) =>
+    lines.evaluate((sel) => {
+      const describe = (node) =>
+        node.nodeType === 3 ? `text:${node.nodeValue}` : node.matches('font[data-il]') ? `tr:${node.textContent}` : `${node.localName}`;
+      return [...document.querySelector(sel).childNodes].map(describe);
+    }, selector);
+
+  await step('posts with line breaks are translated line by line', async () => {
+    await ext.toggle('/lines');
+    await waitFor(async () => (await layout('#post span')).filter((n) => n.startsWith('tr:[zh-CN]')).length === 3, 'three lines');
+    assert.deepEqual(await layout('#post span'), [
+      'text:It works :)\n',
+      'tr:[zh-CN] It works :)',
+      'text:\n',
+      'text:- First line of the list\n',
+      'tr:[zh-CN] - First line of the list',
+      'text:- Second line with a ',
+      'a',
+      'text: inside',
+      'tr:[zh-CN] - Second line with a link inside',
+    ]);
+    assert.deepEqual(await layout('#verse'), [
+      'text:First line of the verse',
+      'br',
+      'tr:[zh-CN] First line of the verse',
+      'text:Second line of the verse',
+      'tr:[zh-CN] Second line of the verse',
+    ]);
+  });
+
+  await step('showing the original puts split lines back together', async () => {
+    await ext.toggle('/lines');
+    assert.deepEqual(await layout('#post span'), [
+      'text:It works :)\n\n- First line of the list\n- Second line with a ',
+      'a',
+      'text: inside',
+    ]);
+    assert.deepEqual(await layout('#verse'), ['text:First line of the verse', 'br', 'text:Second line of the verse']);
+    await lines.close();
   });
 
   const video = await ext.context.newPage();

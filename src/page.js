@@ -74,6 +74,32 @@ const shadowRootOf = (el) => chrome.dom?.openOrClosedShadowRoot?.(el) ?? el.shad
 
 const parentOf = (node) => (node instanceof ShadowRoot ? node.host : node.parentNode);
 
+// Whether line breaks in the text show as line breaks, as in posts and chat messages.
+function keepsBreaks(el) {
+  if (!(el instanceof Element)) return false;
+  const style = getComputedStyle(el);
+  const collapse = style.whiteSpaceCollapse;
+  if (collapse) return collapse !== 'collapse';
+  return /^(pre|pre-wrap|pre-line|break-spaces)$/.test(style.whiteSpace);
+}
+
+// Text nodes and atomic elements of a run, in order, descending through inline elements.
+function leavesOf(nodes) {
+  const leaves = [];
+  const visit = (node) => {
+    if (node.nodeType === Node.TEXT_NODE || node.localName === 'br' || isSkipped(node) || !node.childNodes.length) {
+      leaves.push(node);
+      return;
+    }
+    for (const child of node.childNodes) visit(child);
+  };
+  nodes.forEach(visit);
+  return leaves;
+}
+
+const endsLine = (leaf, breaks) =>
+  leaf.localName === 'br' || (breaks && leaf.nodeType === Node.TEXT_NODE && leaf.nodeValue.endsWith('\n'));
+
 const isBlank = (node) => node.nodeType === Node.TEXT_NODE && !node.nodeValue.trim();
 
 function addStyle(parent) {
@@ -99,6 +125,7 @@ export class PageTranslator {
     this.blocks = new WeakMap();
     this.observed = new WeakMap();
     this.wrappers = new Set();
+    this.splitParents = new Set();
     this.queue = [];
     this.dirtyBlocks = new Set();
     this.newRoots = new Set();
@@ -130,6 +157,8 @@ export class PageTranslator {
     this.mutations.disconnect();
     for (const wrapper of this.wrappers) wrapper.remove();
     for (const wrapper of document.querySelectorAll('font[data-il]')) wrapper.remove();
+    // Text nodes split at line breaks are joined again, so the page is as it was.
+    for (const parent of this.splitParents) parent.normalize();
     this.reset();
   }
 
@@ -160,8 +189,7 @@ export class PageTranslator {
     this.blocks.set(block, units);
     let run = [];
     const flush = () => {
-      const unit = this.makeUnit(block, run);
-      if (unit) units.push(unit);
+      units.push(...this.makeUnits(block, run));
       run = [];
     };
     for (const child of block.childNodes) {
@@ -219,19 +247,75 @@ export class PageTranslator {
     this.visibility.observe(target);
   }
 
-  makeUnit(block, run) {
+  // One unit per run, or one per line when the run has line breaks in it.
+  makeUnits(block, run) {
     let start = 0;
     let end = run.length;
     while (start < end && (isBlank(run[start]) || run[start].localName === 'br')) start++;
     while (end > start && (isBlank(run[end - 1]) || run[end - 1].localName === 'br')) end--;
     const nodes = run.slice(start, end);
-    if (!nodes.length) return null;
+    if (!nodes.length) return [];
+    const breaks = keepsBreaks(block);
+    const text = nodes.map(textOf).join('');
+    if (!/\n\s*\S/.test(text.trim()) || (!breaks && !nodes.some((n) => n.localName === 'br' || n.querySelector?.('br')))) {
+      const unit = this.makeUnit(block, nodes, null, null);
+      return unit ? [unit] : [];
+    }
+    return this.lineUnits(block, nodes, breaks);
+  }
+
+  // Each line gets its translation right under it. The translation goes after
+  // the line's own break, so the page's spacing between lines stays the same.
+  lineUnits(block, nodes, breaks) {
+    let leaves = leavesOf(nodes);
+    if (breaks) leaves = this.splitAtBreaks(leaves);
+    const units = [];
+    let line = [];
+    const close = () => {
+      if (!line.length) return;
+      let anchor = line.at(-1);
+      // Never inside a link, where the translation would become part of it.
+      while (anchor.parentElement?.localName === 'a' && anchor.parentElement !== block) anchor = anchor.parentElement;
+      const unit = this.makeUnit(block, line, anchor, false);
+      if (unit) units.push(unit);
+      line = [];
+    };
+    for (const leaf of leaves) {
+      line.push(leaf);
+      if (endsLine(leaf, breaks)) close();
+    }
+    close();
+    return units;
+  }
+
+  splitAtBreaks(leaves) {
+    // Splitting text is our own change; it must not read as the page changing.
+    const pending = this.mutations.takeRecords();
+    if (pending.length) this.onMutations(pending);
+    const out = [];
+    for (let leaf of leaves) {
+      while (leaf.nodeType === Node.TEXT_NODE) {
+        const cut = leaf.nodeValue.indexOf('\n');
+        if (cut < 0 || cut === leaf.nodeValue.length - 1) break;
+        this.splitParents.add(leaf.parentNode);
+        const rest = leaf.splitText(cut + 1);
+        out.push(leaf);
+        leaf = rest;
+      }
+      out.push(leaf);
+    }
+    this.mutations.takeRecords();
+    return out;
+  }
+
+  makeUnit(block, nodes, anchor, inlineAllowed) {
     const text = normalize(nodes.map(textOf).join(''));
     if (!shouldTranslate(text, this.getSettings().targetLanguage)) return null;
     // A line that is only code, like a list of element or function names, is not prose.
     if (!/\p{L}/u.test(nodes.map((node) => textOf(node, false)).join(''))) return null;
-    const inline = !this.rule?.block && text.length <= INLINE_MAX_CHARS && !PROSE_TAGS.has(block.localName);
-    return { block, nodes, text, inline, wrapper: null, state: 'idle', session: this.session };
+    const inline =
+      inlineAllowed !== false && !this.rule?.block && text.length <= INLINE_MAX_CHARS && !PROSE_TAGS.has(block.localName);
+    return { block, nodes, anchor: anchor ?? nodes.at(-1), text, inline, wrapper: null, state: 'idle', session: this.session };
   }
 
   onVisible(entries) {
@@ -248,7 +332,7 @@ export class PageTranslator {
   }
 
   enqueue(unit) {
-    const anchor = unit.nodes.at(-1);
+    const anchor = unit.anchor;
     if (!anchor.isConnected) return;
     if (!unit.wrapper) {
       const wrapper = document.createElement('font');

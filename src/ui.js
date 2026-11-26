@@ -29,9 +29,20 @@ const CSS = `
 .actions { display: flex; gap: 4px; justify-content: flex-end; margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
 .actions button { all: unset; cursor: pointer; color: var(--muted); font-size: 12px; padding: 2px 8px; border-radius: 6px; }
 .actions button:hover { color: var(--fg); background: var(--line); }
-.toast { position: fixed; top: 16px; right: 16px; max-width: 320px; background: var(--bg); color: var(--fg);
+.toast { position: fixed; top: 16px; right: 16px; z-index: 2147483647; max-width: 320px; background: var(--bg); color: var(--fg);
   border: 1px solid var(--line); border-left: 3px solid #d14343; border-radius: 8px; padding: 10px 14px;
   box-shadow: 0 6px 20px rgba(0,0,0,0.18); }
+.fab { position: fixed; right: 0; z-index: 2147483646; width: 40px; height: 36px; padding: 0 0 0 9px;
+  border: 1px solid var(--line); border-right: 0; border-radius: 18px 0 0 18px; background: var(--bg);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.16); cursor: pointer; display: flex; align-items: center;
+  transform: translateX(10px); transition: transform 0.15s ease, background 0.15s ease; touch-action: none;
+  --bg: #ffffff; --line: rgba(0,0,0,0.1); }
+@media (prefers-color-scheme: dark) { .fab { --bg: #23262d; --line: rgba(255,255,255,0.14); } }
+.fab:hover, .fab.dragging { transform: none; }
+.fab img { width: 22px; height: 22px; display: block; pointer-events: none; transition: filter 0.15s ease; }
+.fab:not(.on) img { filter: grayscale(0.85) opacity(0.8); }
+.fab.on { background: #ece9ff; border-color: #a99cff; }
+@media (prefers-color-scheme: dark) { .fab.on { background: #2f2a52; border-color: #6d5fe0; } }
 `;
 
 // Everything Interline draws over a page lives in one shadow root, out of reach
@@ -56,11 +67,15 @@ export class Overlay {
           </div>
         </div>
       </div>
-      <div class="toast" hidden></div>`;
+      <div class="toast" hidden></div>
+      <button class="fab" hidden><img alt="" /></button>`;
     this.icon = this.root.querySelector('.icon');
     this.icon.querySelector('img').src = chrome.runtime.getURL('icons/icon-32.png');
     this.card = this.root.querySelector('.card');
     this.toastEl = this.root.querySelector('.toast');
+    this.fab = this.root.querySelector('.fab');
+    this.fab.querySelector('img').src = chrome.runtime.getURL('icons/icon-32.png');
+    this.fabActive = false;
     this.localize();
     this.request = 0;
 
@@ -88,6 +103,7 @@ export class Overlay {
 
   localize() {
     this.icon.title = this.t('translateSelection');
+    this.fab.title = this.t(this.fabActive ? 'showOriginal' : 'translatePage');
     for (const action of ['speak', 'copy', 'close']) {
       this.root.querySelector(`[data-action="${action}"]`).textContent = this.t(action);
     }
@@ -100,6 +116,54 @@ export class Overlay {
 
   mount() {
     if (!this.host.isConnected) document.documentElement.append(this.host);
+  }
+
+  // The button on the right edge that translates the page or shows the original.
+  // It can be dragged up and down; a drag is not a click.
+  enableFab(onClick, onMoved) {
+    let drag = null;
+    this.fab.addEventListener('pointerdown', (event) => {
+      drag = { startY: event.clientY, top: this.fab.getBoundingClientRect().top, moved: false };
+      this.fab.setPointerCapture(event.pointerId);
+    });
+    this.fab.addEventListener('pointermove', (event) => {
+      if (!drag) return;
+      const dy = event.clientY - drag.startY;
+      if (!drag.moved && Math.abs(dy) < 4) return;
+      drag.moved = true;
+      this.fab.classList.add('dragging');
+      this.placeFab((drag.top + dy) / window.innerHeight);
+    });
+    this.fab.addEventListener('pointerup', () => {
+      // The click that follows a drag must not toggle translation.
+      this.justDragged = !!drag?.moved;
+      drag = null;
+      this.fab.classList.remove('dragging');
+      if (this.justDragged) onMoved(this.fabTop);
+    });
+    this.fab.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (this.justDragged) {
+        this.justDragged = false;
+        return;
+      }
+      onClick();
+    });
+  }
+
+  placeFab(fraction) {
+    const max = (window.innerHeight - 44) / window.innerHeight;
+    this.fabTop = Math.min(max, Math.max(8 / window.innerHeight, fraction));
+    this.fab.style.top = `${(this.fabTop * 100).toFixed(2)}%`;
+  }
+
+  updateFab({ visible, active, top }) {
+    if (visible) this.mount();
+    this.fab.hidden = !visible;
+    this.fabActive = active;
+    this.fab.classList.toggle('on', active);
+    this.fab.title = this.t(active ? 'showOriginal' : 'translatePage');
+    if (top !== undefined && !this.fab.classList.contains('dragging')) this.placeFab(top);
   }
 
   onMouseUp(event) {

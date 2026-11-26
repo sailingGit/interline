@@ -23,12 +23,24 @@ async function main() {
     },
   });
   const isTop = window === window.top;
+  const showFab = () =>
+    overlay.updateFab({ visible: isTop && settings.floatingButton, active: page.active, top: settings.fabTop });
+  if (isTop) {
+    overlay.enableFab(
+      () => chrome.runtime.sendMessage({ type: 'toggleTab' }).catch(() => {}),
+      (top) => chrome.storage.local.set({ fabTop: top }),
+    );
+    showFab();
+  }
   // The caption hook runs in YouTube's top frame only, so the subtitles do too.
   const youtube = isTop ? new YouTubeSubtitles({ getSettings, t: (...args) => t(...args), overlay }) : null;
   const alwaysHere = () => settings.alwaysSites.includes(location.hostname);
   chrome.runtime
     .sendMessage({ type: 'frameReady' })
-    .then((reply) => reply?.active && page.start())
+    .then((reply) => {
+      if (reply?.active) page.start();
+      if (isTop) showFab();
+    })
     .catch(() => {});
 
   chrome.storage.onChanged.addListener(async (changes, area) => {
@@ -50,6 +62,7 @@ async function main() {
       chrome.runtime.sendMessage({ type: 'startTab' }).catch(() => {});
     }
     if ('youtubeSubtitles' in changes) youtube?.run();
+    if (isTop && ('floatingButton' in changes || 'fabTop' in changes || 'targetLanguage' in changes)) showFab();
   });
 
   return (message) => {
@@ -57,6 +70,7 @@ async function main() {
       lastToast = null;
       if (message.active) page.start();
       else page.stop();
+      if (isTop) showFab();
       return { active: page.active };
     }
     if (message?.type === 'state') return { host: location.hostname };
