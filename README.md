@@ -38,6 +38,7 @@ npm run build
 | `npm run build` | 打包到 `dist` |
 | `npm test` | 单元测试：文本过滤、分批、引擎请求与解析、字幕解析 |
 | `npm run test:e2e` | 在真实 Chromium 里加载扩展，用本地模拟的翻译服务和播放器跑完整流程 |
+| `npm run smoke` | 调用真实的 OpenAI（或兼容接口）翻译几段网页文字和字幕，会花一点钱；Key 从 `.env.local` 读取 |
 | `npm run package` | 打包成 `release/interline-<版本>.zip` |
 | `npm run icons` | 从 `assets/*.svg` 生成图标 |
 

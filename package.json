@@ -6,6 +6,7 @@
     "build": "node build.mjs",
     "test": "node --test test/*.test.js",
     "test:e2e": "npm run build && node test/e2e/run.mjs",
+    "smoke": "node --env-file-if-exists=.env.local test/smoke.mjs",
     "package": "npm run build && mkdir -p release && rm -f release/interline-$npm_package_version.zip && cd dist && zip -qrX ../release/interline-$npm_package_version.zip .",
     "icons": "node scripts/icons.mjs"
   },
