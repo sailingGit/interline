@@ -20,6 +20,7 @@ const ARTICLE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><tit
   <pre id="code">const answer = computeTheAnswer();</pre>
   <div id="mixed">Intro sentence before a block.<p id="nested">Nested paragraph inside.</p>Closing words after it.</div>
   <p id="numbers">2026 · 42%</p>
+  <ul id="api"><li><a href="#"><code>getElementById()</code></a></li></ul>
   <button id="btn">Subscribe now</button>
   <p id="sel">Select this sentence to translate it.</p>
   <div style="height: 4000px"></div>
@@ -49,6 +50,45 @@ const X_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><titl
   </main>
 </body></html>`;
 
+const framesPage = (otherOrigin) => `<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body>
+  <h1 id="title">Frames around the world</h1>
+  <iframe id="same" src="/inner?n=same"></iframe>
+  <iframe id="cross" src="${otherOrigin}/inner?n=cross"></iframe>
+  <iframe id="doc" srcdoc="<p id='p'>Text written straight into a srcdoc frame.</p>"></iframe>
+</body></html>`;
+
+const innerPage = (name) =>
+  `<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body><p id="p">Paragraph inside the ${name} frame.</p></body></html>`;
+
+const SHADOW_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body>
+  <h1 id="title">Components everywhere</h1>
+  <open-card id="open"><span>Slotted light paragraph text.</span></open-card>
+  <closed-card id="closed"></closed-card>
+  <script>
+    customElements.define('open-card', class extends HTMLElement {
+      constructor() {
+        super();
+        this.attachShadow({ mode: 'open' }).innerHTML =
+          '<style>:host { display: block }</style><p id="inner">Text inside an open shadow root.</p>' +
+          '<nested-card></nested-card><div><slot></slot></div>';
+      }
+    });
+    customElements.define('nested-card', class extends HTMLElement {
+      constructor() {
+        super();
+        this.attachShadow({ mode: 'open' }).innerHTML = '<p id="deep">Text two shadow roots deep.</p>';
+      }
+    });
+    customElements.define('closed-card', class extends HTMLElement {
+      constructor() {
+        super();
+        window.closedRoot = this.attachShadow({ mode: 'closed' });
+        window.closedRoot.innerHTML = '<p id="sealed">Text inside a closed shadow root.</p>';
+      }
+    });
+  </script>
+</body></html>`;
+
 const CAPTIONS = {
   events: [
     { tStartMs: 0, dDurationMs: 2000, segs: [{ utf8: 'Hello there, friends.' }] },
@@ -64,6 +104,12 @@ async function startMock(tls) {
     if (req.method === 'OPTIONS') return res.writeHead(204).end();
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname === '/article') return res.writeHead(200, { 'content-type': 'text/html' }).end(ARTICLE);
+    if (url.pathname === '/frames') {
+      const other = req.headers.host.startsWith('localhost') ? req.headers.host.replace('localhost', '127.0.0.1') : req.headers.host;
+      return res.writeHead(200, { 'content-type': 'text/html' }).end(framesPage(`http://${other}`));
+    }
+    if (url.pathname === '/inner') return res.writeHead(200, { 'content-type': 'text/html' }).end(innerPage(url.searchParams.get('n')));
+    if (url.pathname === '/shadow') return res.writeHead(200, { 'content-type': 'text/html' }).end(SHADOW_PAGE);
     if (url.pathname === '/x') return res.writeHead(200, { 'content-type': 'text/html' }).end(X_PAGE);
     if (url.pathname === '/watch') return res.writeHead(200, { 'content-type': 'text/html' }).end(PLAYER);
     if (url.pathname === '/api/timedtext') {
@@ -140,15 +186,12 @@ async function launch(root, securePort) {
     context,
     worker,
     extensionId,
-    send: (urlPart, message) =>
-      worker.evaluate(
-        async ([part, msg]) => {
-          const tabs = await chrome.tabs.query({});
-          const tab = tabs.find((t) => t.url?.includes(part));
-          return chrome.tabs.sendMessage(tab.id, msg);
-        },
-        [urlPart, message],
-      ),
+    // Like a click on the toolbar button for the tab whose URL contains `urlPart`.
+    toggle: (urlPart) =>
+      worker.evaluate(async (part) => {
+        const tab = (await chrome.tabs.query({})).find((t) => t.url?.includes(part));
+        return toggleTab(tab.id);
+      }, urlPart),
     close: async () => {
       await context.close();
       await rm(root, { recursive: true, force: true });
@@ -206,7 +249,7 @@ try {
   await page.waitForTimeout(300);
 
   await step('page translation puts translations under visible paragraphs', async () => {
-    await ext.send('/article', { type: 'toggle' });
+    await ext.toggle('/article');
     await waitFor(async () => (await translationOf(page, '#p1'))[0]?.text.startsWith('[zh-CN]'), 'p1 translation');
     assert.deepEqual(await translationOf(page, '#p1'), [
       { text: '[zh-CN] Reading slowly is a deliberate choice, and pace matters.', inline: false, state: 'il-wrap notranslate il-block' },
@@ -222,8 +265,8 @@ try {
     assert.ok(items.every((name) => name?.includes('il-inline')), JSON.stringify(items));
   });
 
-  await step('text already in the target language, code, numbers and buttons are left alone', async () => {
-    for (const id of ['#zh', '#code', '#numbers', '#btn']) {
+  await step('text already in the target language, code, code-only lines, numbers and buttons are left alone', async () => {
+    for (const id of ['#zh', '#code', '#numbers', '#btn', '#api']) {
       assert.deepEqual(await page.evaluate((sel) => document.querySelector(sel).querySelectorAll('font[data-il]').length, id), 0, id);
     }
     const sent = mock.requests.flatMap((r) => r.texts);
@@ -283,25 +326,28 @@ try {
 
   await step('the display style setting reaches the page', async () => {
     await ext.worker.evaluate(() => chrome.storage.local.set({ displayStyle: 'highlight' }));
-    await waitFor(() => page.evaluate(() => document.documentElement.dataset.ilStyle === 'highlight'), 'style');
+    await waitFor(
+      () => page.evaluate(() => [...document.querySelectorAll('font[data-il]')].every((w) => w.dataset.ilStyle === 'highlight')),
+      'style',
+    );
   });
 
   await step('toggling again restores the original page', async () => {
-    const state = await ext.send('/article', { type: 'toggle' });
+    const state = await ext.toggle('/article');
     assert.equal(state.active, false);
     assert.equal(await page.evaluate(() => document.querySelectorAll('font[data-il]').length), 0);
     assert.equal(await page.locator('#p1').innerText(), 'Reading slowly is a deliberate choice, and pace matters.');
   });
 
   await step('a new target language re-translates an active page', async () => {
-    await ext.send('/article', { type: 'toggle' });
+    await ext.toggle('/article');
     await page.locator('#title').scrollIntoViewIfNeeded();
     await waitFor(async () => (await translationOf(page, '#title'))[0]?.text.startsWith('[zh-CN]'), 'zh title');
     await ext.worker.evaluate(() => chrome.storage.local.set({ targetLanguage: 'ja' }));
     await waitFor(async () => (await translationOf(page, '#title'))[0]?.text.startsWith('[ja]'), 'ja title');
     assert.equal((await translationOf(page, '#title')).length, 1);
     await ext.worker.evaluate(() => chrome.storage.local.set({ targetLanguage: 'zh-CN' }));
-    await ext.send('/article', { type: 'toggle' });
+    await ext.toggle('/article');
   });
 
   await step('selecting text offers a translate button that opens a card', async () => {
@@ -323,7 +369,7 @@ try {
 
   await step('failures are marked on the paragraph and explained once', async () => {
     mock.failWith = 429;
-    await ext.send('/article', { type: 'toggle' });
+    await ext.toggle('/article');
     await page.evaluate(() => scrollTo(0, 0));
     await page.evaluate(() => {
       const p = document.createElement('p');
@@ -337,7 +383,7 @@ try {
     mock.failWith = null;
     await page.locator('#fails font[data-il]').click();
     await waitFor(async () => (await translationOf(page, '#fails'))[0]?.text === '[zh-CN] This one will hit a rate limit.', 'retry');
-    await ext.send('/article', { type: 'toggle' });
+    await ext.toggle('/article');
   });
 
   const video = await ext.context.newPage();
@@ -376,7 +422,7 @@ try {
 
   await step('on X only posts and bios are translated, each on its own line', async () => {
     const before = mock.requests.length;
-    await ext.send('x.com', { type: 'toggle' });
+    await ext.toggle('x.com');
     await waitFor(async () => (await translationOf(x, '#post1 [data-testid="tweetText"]'))[0]?.text.startsWith('[zh-CN]'), 'post');
     assert.deepEqual(await translationOf(x, '#post1 [data-testid="tweetText"]'), [
       { text: '[zh-CN] Hello from the future', inline: false, state: 'il-wrap notranslate il-block' },
@@ -401,7 +447,97 @@ try {
       'later post',
     );
     assert.equal(await x.evaluate(() => document.querySelectorAll('font[data-il]').length), 3);
-    await ext.send('x.com', { type: 'toggle' });
+    await ext.toggle('x.com');
+  });
+
+  const frames = await ext.context.newPage();
+  frames.on('pageerror', (err) => errors.push(err.message));
+  await frames.goto(`${mock.origin}/frames`);
+  await frames.waitForTimeout(500);
+  const frameText = (match) =>
+    frames
+      .frames()
+      .find((f) => f.url().includes(match))
+      ?.evaluate(() => document.querySelector('#p font[data-il]')?.textContent ?? null);
+
+  await step('same-origin, cross-origin and srcdoc iframes are translated with the page', async () => {
+    await ext.toggle('/frames');
+    for (const [match, text] of [
+      ['n=same', 'Paragraph inside the same frame.'],
+      ['n=cross', 'Paragraph inside the cross frame.'],
+      ['about:srcdoc', 'Text written straight into a srcdoc frame.'],
+    ]) {
+      await waitFor(async () => (await frameText(match)) === `[zh-CN] ${text}`, match);
+    }
+  });
+
+  await step('an iframe added after translation started follows the tab', async () => {
+    await frames.evaluate(() => {
+      const frame = document.createElement('iframe');
+      frame.src = '/inner?n=late';
+      document.body.append(frame);
+    });
+    await waitFor(async () => (await frameText('n=late')) === '[zh-CN] Paragraph inside the late frame.', 'late frame');
+  });
+
+  await step('turning translation off clears every frame', async () => {
+    const state = await ext.toggle('/frames');
+    assert.equal(state.active, false);
+    for (const match of ['n=same', 'n=cross', 'about:srcdoc', 'n=late']) {
+      await waitFor(async () => (await frameText(match)) === null, `${match} cleared`);
+    }
+  });
+
+  const shadow = await ext.context.newPage();
+  shadow.on('pageerror', (err) => errors.push(err.message));
+  await shadow.goto(`${mock.origin}/shadow`);
+  await shadow.waitForTimeout(300);
+  const shadowState = () =>
+    shadow.evaluate(() => {
+      const open = document.querySelector('#open').shadowRoot;
+      const nested = open.querySelector('nested-card').shadowRoot;
+      const read = (root, sel) => root.querySelector(`${sel} font[data-il]`)?.textContent ?? null;
+      return {
+        inner: read(open, '#inner'),
+        deep: read(nested, '#deep'),
+        sealed: read(window.closedRoot, '#sealed'),
+        slotted: document.querySelector('#open > font[data-il]')?.textContent ?? null,
+        innerDisplay: (() => {
+          const w = open.querySelector('#inner font[data-il]');
+          return w && getComputedStyle(w).display;
+        })(),
+        later: read(open, '#later'),
+      };
+    });
+
+  await step('open, nested and closed shadow roots are translated, styled inside the component', async () => {
+    await ext.toggle('/shadow');
+    await waitFor(async () => {
+      const state = await shadowState();
+      return state.inner && state.deep && state.sealed && state.slotted;
+    }, 'shadow translations');
+    const state = await shadowState();
+    assert.equal(state.inner, '[zh-CN] Text inside an open shadow root.');
+    assert.equal(state.deep, '[zh-CN] Text two shadow roots deep.');
+    assert.equal(state.sealed, '[zh-CN] Text inside a closed shadow root.');
+    assert.equal(state.slotted, '[zh-CN] Slotted light paragraph text.');
+    assert.equal(state.innerDisplay, 'block');
+  });
+
+  await step('content a component renders later is translated', async () => {
+    await shadow.evaluate(() => {
+      const p = document.createElement('p');
+      p.id = 'later';
+      p.textContent = 'Added inside the shadow root later.';
+      document.querySelector('#open').shadowRoot.append(p);
+    });
+    await waitFor(async () => (await shadowState()).later === '[zh-CN] Added inside the shadow root later.', 'later in shadow');
+  });
+
+  await step('turning translation off clears shadow roots too', async () => {
+    await ext.toggle('/shadow');
+    const state = await shadowState();
+    assert.deepEqual([state.inner, state.deep, state.sealed, state.slotted, state.later], [null, null, null, null, null]);
   });
 
   await step('popup and settings pages render without errors', async () => {
@@ -423,9 +559,9 @@ try {
     assert.equal(await old.evaluate(() => document.querySelectorAll('[data-il-ui]').length), 0);
     const state = await ext.worker.evaluate(async () => {
       const tab = (await chrome.tabs.query({})).find((t) => t.url?.includes('preinstalled'));
-      return sendToPage(tab.id, { type: 'toggle' });
+      return toggleTab(tab.id);
     });
-    assert.deepEqual(state, { active: true });
+    assert.deepEqual(state, { active: true, host: 'localhost' });
     await waitFor(async () => (await translationOf(old, '#title')).some((w) => w.text.startsWith('[zh-CN]')), 'injected translation');
     await old.close();
   });

@@ -1,5 +1,5 @@
 import { DISPLAY_STYLES, LANGUAGES, loadSettings, translator, uiLanguage } from './i18n.js';
-import { sendToPage } from './tabs.js';
+import { tabState, toggleTab } from './tabs.js';
 
 const $ = (id) => document.getElementById(id);
 const ENGINES = ['google', 'openai', 'custom'];
@@ -36,7 +36,7 @@ async function render() {
   warning.textContent = t('needKey');
 
   const tab = await activeTab();
-  const state = tab ? await sendToPage(tab.id, { type: 'state' }) : null;
+  const state = tab ? await tabState(tab.id) : null;
   const toggle = $('toggle');
   toggle.disabled = !state;
   toggle.textContent = !state ? t('unsupported') : state.active ? t('showOriginal') : t('translatePage');
@@ -59,7 +59,7 @@ async function main() {
 
   $('toggle').addEventListener('click', async () => {
     if (!current.state) return;
-    await sendToPage(current.tab.id, { type: 'toggle' });
+    await toggleTab(current.tab.id);
     current = await render();
   });
 

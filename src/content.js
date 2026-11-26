@@ -22,10 +22,14 @@ async function main() {
       overlay.toast(t(`error.${code}`));
     },
   });
-  const youtube = new YouTubeSubtitles({ getSettings, t: (...args) => t(...args), overlay });
-
+  const isTop = window === window.top;
+  // The caption hook runs in YouTube's top frame only, so the subtitles do too.
+  const youtube = isTop ? new YouTubeSubtitles({ getSettings, t: (...args) => t(...args), overlay }) : null;
   const alwaysHere = () => settings.alwaysSites.includes(location.hostname);
-  if (alwaysHere()) page.start();
+  chrome.runtime
+    .sendMessage({ type: 'frameReady' })
+    .then((reply) => reply?.active && page.start())
+    .catch(() => {});
 
   chrome.storage.onChanged.addListener(async (changes, area) => {
     if (area !== 'local') return;
@@ -39,20 +43,23 @@ async function main() {
     if (retranslate) {
       lastToast = null;
       page.restart();
-      youtube.reset();
+      youtube?.reset();
     }
     if ('displayStyle' in changes && page.active) page.applyStyle();
-    if ('alwaysSites' in changes && alwaysHere() && !previous.alwaysSites.includes(location.hostname)) page.start();
-    if ('youtubeSubtitles' in changes) youtube.run();
+    if (isTop && 'alwaysSites' in changes && alwaysHere() && !previous.alwaysSites.includes(location.hostname)) {
+      chrome.runtime.sendMessage({ type: 'startTab' }).catch(() => {});
+    }
+    if ('youtubeSubtitles' in changes) youtube?.run();
   });
 
   return (message) => {
-    if (message?.type === 'toggle') {
+    if (message?.type === 'setActive') {
       lastToast = null;
-      page.toggle();
+      if (message.active) page.start();
+      else page.stop();
       return { active: page.active };
     }
-    if (message?.type === 'state') return { active: page.active, host: location.hostname };
+    if (message?.type === 'state') return { host: location.hostname };
     if (message?.type === 'translateSelection') overlay.translateSelection(message.text);
     return {};
   };
@@ -62,7 +69,7 @@ function listen(ready) {
   // Registered before settings load, so a message sent right after the script
   // is injected into an already open tab is not lost.
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (!['toggle', 'state', 'translateSelection'].includes(message?.type)) return false;
+    if (!['setActive', 'state', 'translateSelection'].includes(message?.type)) return false;
     ready.then((handle) => sendResponse(handle(message)));
     return true;
   });

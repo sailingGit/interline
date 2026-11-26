@@ -1,6 +1,6 @@
 import { EngineError, translate } from './engines.js';
 import { loadSettings } from './i18n.js';
-import { sendToPage } from './tabs.js';
+import { setActive, tabActive, toggleTab } from './tabs.js';
 
 const CACHE_LIMIT = 5000;
 const cache = new Map();
@@ -39,7 +39,27 @@ async function translateTexts(texts, purpose) {
   return keys.map((key) => cache.get(key) ?? null);
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+// Each frame asks on start whether its tab is being translated. A new top-level
+// document starts from the site setting, and frames that started before it follow.
+async function frameReady(sender) {
+  const tabId = sender.tab?.id;
+  if (tabId === undefined) return false;
+  if (sender.frameId !== 0) return tabActive(tabId);
+  const s = await settings();
+  const active = s.alwaysSites.includes(new URL(sender.url).hostname);
+  await setActive(tabId, active);
+  return active;
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'frameReady') {
+    frameReady(sender).then((active) => sendResponse({ active }));
+    return true;
+  }
+  if (message?.type === 'startTab' && sender.tab) {
+    setActive(sender.tab.id, true).then(() => sendResponse({}));
+    return true;
+  }
   if (message?.type !== 'translate') return false;
   translateTexts(message.texts, message.purpose ?? 'page')
     .then((translations) => sendResponse({ translations }))
@@ -53,7 +73,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 chrome.commands.onCommand.addListener(async (command, tab) => {
   if (command !== 'toggle-page') return;
   const target = tab ?? (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
-  if (target?.id) await sendToPage(target.id, { type: 'toggle' });
+  if (target?.id) await toggleTab(target.id);
 });
 
 function createMenus() {
@@ -76,12 +96,15 @@ chrome.runtime.onStartup.addListener(createMenus);
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (!tab?.id) return;
-  if (info.menuItemId === 'translate-page') sendToPage(tab.id, { type: 'toggle' });
+  if (info.menuItemId === 'translate-page') toggleTab(tab.id);
   if (info.menuItemId === 'translate-selection') {
-    sendToPage(tab.id, { type: 'translateSelection', text: info.selectionText });
+    // The card opens in the frame the text was selected in.
+    chrome.tabs
+      .sendMessage(tab.id, { type: 'translateSelection', text: info.selectionText }, { frameId: info.frameId ?? 0 })
+      .catch(() => {});
   }
 });
 
 // Exposed for the end-to-end test, which cannot press the shortcut.
 globalThis.translateTexts = translateTexts;
-globalThis.sendToPage = sendToPage;
+globalThis.toggleTab = toggleTab;

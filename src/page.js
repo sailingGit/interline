@@ -27,9 +27,9 @@ font.il-text { font: inherit; color: inherit; }
 font.il-loading > font.il-text::after { content: "···"; letter-spacing: 1px; opacity: 0.45; animation: il-pulse 1s ease-in-out infinite; }
 font.il-error > font.il-text { cursor: pointer; color: #d14343; }
 @keyframes il-pulse { 50% { opacity: 0.12; } }
-html[data-il-style="faded"] font.il-text { opacity: 0.72; }
-html[data-il-style="dashed"] font.il-text { text-decoration: underline dashed rgba(47, 111, 237, 0.75); text-underline-offset: 0.25em; text-decoration-thickness: 1px; }
-html[data-il-style="highlight"] font.il-text { background: rgba(255, 204, 0, 0.28); border-radius: 2px; box-decoration-break: clone; -webkit-box-decoration-break: clone; padding: 0 2px; }
+font.il-wrap[data-il-style="faded"] > font.il-text { opacity: 0.72; }
+font.il-wrap[data-il-style="dashed"] > font.il-text { text-decoration: underline dashed rgba(47, 111, 237, 0.75); text-underline-offset: 0.25em; text-decoration-thickness: 1px; }
+font.il-wrap[data-il-style="highlight"] > font.il-text { background: rgba(255, 204, 0, 0.28); border-radius: 2px; box-decoration-break: clone; -webkit-box-decoration-break: clone; padding: 0 2px; }
 `;
 
 function isOurs(node) {
@@ -59,17 +59,30 @@ function classify(el) {
   return el.querySelector(BLOCK_SELECTOR) ? 'container' : 'inline';
 }
 
-function textOf(node) {
+function textOf(node, withCode = true) {
   if (node.nodeType === Node.TEXT_NODE) return node.nodeValue;
   if (node.nodeType !== Node.ELEMENT_NODE) return '';
   if (node.localName === 'br') return '\n';
-  if (isSkipped(node)) return '';
+  if (isSkipped(node) || (!withCode && node.localName === 'code')) return '';
   let text = '';
-  for (const child of node.childNodes) text += textOf(child);
+  for (const child of node.childNodes) text += textOf(child, withCode);
   return text;
 }
 
+// Content scripts can also reach closed shadow roots.
+const shadowRootOf = (el) => chrome.dom?.openOrClosedShadowRoot?.(el) ?? el.shadowRoot;
+
+const parentOf = (node) => (node instanceof ShadowRoot ? node.host : node.parentNode);
+
 const isBlank = (node) => node.nodeType === Node.TEXT_NODE && !node.nodeValue.trim();
+
+function addStyle(parent) {
+  if (parent.querySelector?.(':scope > style[data-il-style-sheet]')) return;
+  const style = document.createElement('style');
+  style.setAttribute('data-il-style-sheet', '');
+  style.textContent = PAGE_CSS;
+  parent.append(style);
+}
 
 export class PageTranslator {
   constructor({ getSettings, t, onError }) {
@@ -84,6 +97,8 @@ export class PageTranslator {
 
   reset() {
     this.blocks = new WeakMap();
+    this.observed = new WeakMap();
+    this.wrappers = new Set();
     this.queue = [];
     this.dirtyBlocks = new Set();
     this.newRoots = new Set();
@@ -94,23 +109,13 @@ export class PageTranslator {
     this.mutationTimer = null;
   }
 
-  toggle() {
-    if (this.active) this.stop();
-    else this.start();
-  }
-
   start() {
     if (this.active || !document.body) return;
     this.active = true;
     this.session++;
     this.reset();
     this.applyStyle();
-    if (!document.getElementById('il-page-style')) {
-      const style = document.createElement('style');
-      style.id = 'il-page-style';
-      style.textContent = PAGE_CSS;
-      (document.head ?? document.documentElement).append(style);
-    }
+    addStyle(document.head ?? document.documentElement);
     this.visibility = new IntersectionObserver((entries) => this.onVisible(entries), { rootMargin: '600px 0px' });
     this.mutations = new MutationObserver((records) => this.onMutations(records));
     for (const root of this.roots(document.body)) this.scanBlock(root);
@@ -123,8 +128,9 @@ export class PageTranslator {
     this.session++;
     this.visibility.disconnect();
     this.mutations.disconnect();
-    this.reset();
+    for (const wrapper of this.wrappers) wrapper.remove();
     for (const wrapper of document.querySelectorAll('font[data-il]')) wrapper.remove();
+    this.reset();
   }
 
   // A new target language or engine means every translation on screen is stale.
@@ -135,7 +141,8 @@ export class PageTranslator {
   }
 
   applyStyle() {
-    document.documentElement.dataset.ilStyle = this.getSettings().displayStyle;
+    const style = this.getSettings().displayStyle;
+    for (const wrapper of this.wrappers) wrapper.dataset.ilStyle = style;
   }
 
   // Where translation starts: the whole page, or only what a site rule includes.
@@ -171,6 +178,14 @@ export class PageTranslator {
         run.push(child);
         continue;
       }
+      // Web components render their own tree; their light children are slotted into it.
+      const shadow = shadowRootOf(child);
+      if (shadow) {
+        flush();
+        this.scanShadow(shadow);
+        this.scanBlock(child);
+        continue;
+      }
       const kind = classify(child);
       if (kind === 'hidden') continue;
       if (kind === 'container') {
@@ -181,7 +196,27 @@ export class PageTranslator {
       }
     }
     flush();
-    if (units.length) this.visibility.observe(block);
+    if (units.length) this.observe(block, units);
+  }
+
+  // Page styles and observers stop at a shadow boundary, so each root gets its own.
+  scanShadow(root) {
+    if (this.blocks.has(root)) return;
+    addStyle(root);
+    this.mutations.observe(root, { childList: true, subtree: true, characterData: true });
+    this.scanBlock(root);
+  }
+
+  observe(block, units) {
+    const target = block instanceof ShadowRoot ? block.host : block;
+    // A display: contents box never intersects anything, so it is translated right away.
+    if (getComputedStyle(target).display === 'contents') {
+      for (const unit of units) this.enqueue(unit);
+      return;
+    }
+    if (!this.observed.has(target)) this.observed.set(target, new Set());
+    this.observed.get(target).add(block);
+    this.visibility.observe(target);
   }
 
   makeUnit(block, run) {
@@ -193,6 +228,8 @@ export class PageTranslator {
     if (!nodes.length) return null;
     const text = normalize(nodes.map(textOf).join(''));
     if (!shouldTranslate(text, this.getSettings().targetLanguage)) return null;
+    // A line that is only code, like a list of element or function names, is not prose.
+    if (!/\p{L}/u.test(nodes.map((node) => textOf(node, false)).join(''))) return null;
     const inline = !this.rule?.block && text.length <= INLINE_MAX_CHARS && !PROSE_TAGS.has(block.localName);
     return { block, nodes, text, inline, wrapper: null, state: 'idle', session: this.session };
   }
@@ -201,9 +238,12 @@ export class PageTranslator {
     for (const entry of entries) {
       if (!entry.isIntersecting) continue;
       this.visibility.unobserve(entry.target);
-      for (const unit of this.blocks.get(entry.target) ?? []) {
-        if (unit.state === 'idle') this.enqueue(unit);
+      for (const block of this.observed.get(entry.target) ?? []) {
+        for (const unit of this.blocks.get(block) ?? []) {
+          if (unit.state === 'idle') this.enqueue(unit);
+        }
       }
+      this.observed.delete(entry.target);
     }
   }
 
@@ -215,6 +255,9 @@ export class PageTranslator {
       wrapper.setAttribute('data-il', '');
       wrapper.setAttribute('translate', 'no');
       wrapper.className = `il-wrap notranslate ${unit.inline ? 'il-inline' : 'il-block'}`;
+      wrapper.dataset.ilStyle = this.getSettings().displayStyle;
+      // Light children of a web component render only through their slot.
+      if (anchor.nodeType === Node.ELEMENT_NODE && anchor.slot) wrapper.slot = anchor.slot;
       const text = document.createElement('font');
       text.className = 'il-text';
       wrapper.append(text);
@@ -225,6 +268,7 @@ export class PageTranslator {
         this.enqueue(unit);
       });
       unit.wrapper = wrapper;
+      this.wrappers.add(wrapper);
       anchor.after(wrapper);
     }
     unit.state = 'queued';
@@ -271,6 +315,7 @@ export class PageTranslator {
     if (!translation || normalize(translation) === unit.text) {
       unit.state = 'skipped';
       unit.wrapper.remove();
+      this.wrappers.delete(unit.wrapper);
       return;
     }
     unit.state = 'done';
@@ -316,7 +361,7 @@ export class PageTranslator {
   }
 
   markDirty(el) {
-    for (let node = el; node && node !== document.documentElement; node = node.parentElement) {
+    for (let node = el; node && node !== document.documentElement; node = parentOf(node)) {
       if (this.blocks.has(node)) {
         this.dirtyBlocks.add(node);
         return;
@@ -331,9 +376,9 @@ export class PageTranslator {
       for (const unit of this.blocks.get(block) ?? []) {
         unit.state = 'stale';
         unit.wrapper?.remove();
+        this.wrappers.delete(unit.wrapper);
       }
       this.blocks.delete(block);
-      this.visibility.unobserve(block);
       this.scanBlock(block);
     }
     for (const root of this.newRoots) {
